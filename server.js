@@ -1,89 +1,89 @@
-// server.js
 import express from "express";
 import fetch from "node-fetch";
-import dotenv from "dotenv";
 import { Client, GatewayIntentBits } from "discord.js";
-import path from "path";
-import { fileURLToPath } from "url";
+import dotenv from "dotenv";
+import cors from "cors";
 
 dotenv.config();
 const app = express();
 app.use(express.json());
+app.use(cors());
 
-// --- Discord Bot Config ---
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
-client.login(process.env.BOT_TOKEN);
+// --- Configuración del bot ---
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+});
 
-// --- Paths ---
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-app.use(express.static(__dirname));
+const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
+const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
+const DISCORD_REDIRECT_URI = process.env.DISCORD_REDIRECT_URI || "https://hmfb-production.up.railway.app/auth/discord/callback";
+const GUILD_ID = process.env.GUILD_ID; // ID del servidor Discord
+const ROLE_1MES = process.env.ROLE_1MES;
+const ROLE_3MESES = process.env.ROLE_3MESES;
+const ROLE_6MESES = process.env.ROLE_6MESES;
+const ROLE_PERM = process.env.ROLE_PERM;
 
-// --- Discord OAuth URLs ---
-const CLIENT_ID = process.env.CLIENT_ID;
-const CLIENT_SECRET = process.env.CLIENT_SECRET;
-const REDIRECT_URI = "https://hmfb-production.up.railway.app/auth/discord/callback"; // ⚠️ cambia si tu dominio es distinto
-
-// Ruta para redirigir al login de Discord
+// --- Endpoint: Redirección al login de Discord ---
 app.get("/auth/discord", (req, res) => {
-  const redirect = `https://discord.com/api/oauth2/authorize?client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(
-    REDIRECT_URI
+  const redirect = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(
+    DISCORD_REDIRECT_URI
   )}&response_type=code&scope=identify`;
   res.redirect(redirect);
 });
 
-// Callback de Discord (devuelve info del usuario)
+// --- Endpoint: Callback de Discord OAuth2 ---
 app.get("/auth/discord/callback", async (req, res) => {
   const code = req.query.code;
-  if (!code) return res.status(400).json({ error: "Falta el parámetro 'code'" });
+  if (!code) return res.json({ error: "Falta el código de autorización." });
 
   try {
-    // 1️⃣ Intercambiar el code por un token
-    const tokenRes = await fetch("https://discord.com/api/oauth2/token", {
+    const params = new URLSearchParams();
+    params.append("client_id", DISCORD_CLIENT_ID);
+    params.append("client_secret", DISCORD_CLIENT_SECRET);
+    params.append("grant_type", "authorization_code");
+    params.append("code", code);
+    params.append("redirect_uri", DISCORD_REDIRECT_URI);
+
+    const tokenResponse = await fetch("https://discord.com/api/oauth2/token", {
       method: "POST",
+      body: params,
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        client_id: CLIENT_ID,
-        client_secret: CLIENT_SECRET,
-        grant_type: "authorization_code",
-        code,
-        redirect_uri: REDIRECT_URI,
-      }),
     });
 
-    const tokenData = await tokenRes.json();
-    if (!tokenData.access_token) return res.status(400).json({ error: "No se pudo obtener el token." });
+    const tokenData = await tokenResponse.json();
+    if (!tokenData.access_token)
+      return res.json({ error: "No se pudo obtener token de acceso." });
 
-    // 2️⃣ Obtener datos del usuario
-    const userRes = await fetch("https://discord.com/api/users/@me", {
+    const userResponse = await fetch("https://discord.com/api/users/@me", {
       headers: { Authorization: `Bearer ${tokenData.access_token}` },
     });
+    const userData = await userResponse.json();
 
-    const user = await userRes.json();
-    res.json(user);
+    res.json({ id: userData.id, username: userData.username });
   } catch (err) {
     console.error("Error OAuth2:", err);
-    res.status(500).json({ error: "Error en autenticación" });
+    res.json({ error: "Error al conectar con Discord." });
   }
 });
 
-// --- Endpoint para asignar rol ---
+// --- Endpoint: Asignar rol ---
 app.post("/assign-role", async (req, res) => {
   const { discordId, paquete } = req.body;
-  const guildId = process.env.GUILD_ID;
-
-  const roles = {
-    "1mes": process.env.ROLE_1MES,
-    "3meses": process.env.ROLE_3MESES,
-    "6meses": process.env.ROLE_6MESES,
-    "permanente": process.env.ROLE_PERMANENTE,
-  };
-  const roleId = roles[paquete];
-  if (!discordId || !roleId) return res.json({ ok: false, error: "Datos inválidos" });
+  if (!discordId || !paquete)
+    return res.json({ ok: false, error: "Datos incompletos." });
 
   try {
-    const guild = await client.guilds.fetch(guildId);
+    const guild = await client.guilds.fetch(GUILD_ID);
     const member = await guild.members.fetch(discordId);
+
+    let roleId;
+    if (paquete === "1mes") roleId = ROLE_1MES;
+    else if (paquete === "3meses") roleId = ROLE_3MESES;
+    else if (paquete === "6meses") roleId = ROLE_6MESES;
+    else if (paquete === "permanente") roleId = ROLE_PERM;
+
+    if (!roleId) return res.json({ ok: false, error: "Rol no encontrado." });
+
     await member.roles.add(roleId);
     console.log(`✅ Rol ${paquete} asignado a ${discordId}`);
     res.json({ ok: true });
@@ -92,6 +92,11 @@ app.post("/assign-role", async (req, res) => {
     res.json({ ok: false, error: err.message });
   }
 });
+
+// --- Login del bot ---
+client.login(process.env.DISCORD_TOKEN)
+  .then(() => console.log("🤖 Bot conectado correctamente a Discord."))
+  .catch(err => console.error("❌ Error al conectar el bot:", err));
 
 // --- Inicio del servidor ---
 const PORT = process.env.PORT || 3000;
