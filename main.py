@@ -1,7 +1,4 @@
 # -*- coding: utf-8 -*-
-# ** IMPORTANTE: Este código requiere la librería 'requests'. **
-# ** Instálala ejecutando: pip install requests **
-
 import discord
 from discord.ext import commands, tasks
 import json
@@ -9,12 +6,6 @@ import os
 from datetime import datetime
 from threading import Thread
 from flask import Flask
-# 🚨 IMPORTACIONES ADICIONALES NECESARIAS PARA LA FUNCIÓN
-import requests
-import re
-from urllib.parse import urlparse, parse_qs
-import uuid
-# 🚨 FIN DE IMPORTACIONES ADICIONALES
 
 # --- Configuración Inicial ---
 TOKEN = os.environ['DISCORD_TOKEN']
@@ -49,7 +40,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Cargar los datos de las cuentas al iniciar
 accounts_data = {'available': [], 'distributed': []}
-# *** Conjunto para una búsqueda rápida de emails ya registrados ***
+# *** NUEVO: Conjunto para una búsqueda rápida de emails ya registrados ***
 registered_emails = set()
 
 # --- Funciones Auxiliares ---
@@ -64,9 +55,11 @@ def load_accounts():
                 accounts_data = data
                 # Reconstruir el conjunto de emails registrados
                 registered_emails.clear()
+                # Las cuentas ya distribuidas son las que actúan como "logs"
                 for account in accounts_data['distributed']:
                     if 'gmail' in account:
                         registered_emails.add(account['gmail'].lower())
+                # También registramos las cuentas que aún están en 'available'
                 for account in accounts_data['available']:
                     if 'gmail' in account:
                         registered_emails.add(account['gmail'].lower())
@@ -86,6 +79,7 @@ def save_accounts():
 
 def update_log(account_info, status):
     """Añade una entrada al archivo de registro (log)."""
+    # Usamos el 'gmail' (ahora cualquier email) como identificador principal en el log
     log_entry = (
         f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
         f"STATUS: {status} | Email: {account_info['gmail']} | Pass: {account_info['password']}\n"
@@ -96,6 +90,12 @@ def update_log(account_info, status):
     except Exception as e:
         print(f"Error escribiendo log: {e}")
 
+# *** NUEVO: Función para verificar si la cuenta ya existe (opcional, ya cubierto por registered_emails) ***
+# def is_account_registered(email):
+#     """Verifica si el email ya existe en el conjunto de emails registrados."""
+#     return email.lower() in registered_emails
+
+# *** NUEVO: Función para eliminar el archivo de importación ***
 def remove_import_file(file_path):
     """Elimina el archivo de importación de cuentas."""
     try:
@@ -104,36 +104,7 @@ def remove_import_file(file_path):
     except Exception as e:
         print(f"Error al eliminar archivo {file_path}: {e}")
 
-# 🚨 FUNCIÓN PARA OBTENER EL NOMBRE DE MC (ESTRUCTURA SIMULADA) 🚨
-def obtener_nombre_de_minecraft(email, password):
-    """
-    Simula la obtención del nombre de usuario de Minecraft a partir de 
-    credenciales de Microsoft.
-
-    Devuelve el nombre de usuario (str) o None si falla.
-    
-    Nota: La implementación real de esta función requiere realizar peticiones 
-    sensibles de autenticación a Microsoft/Xbox Live y la API de Minecraft, 
-    lo cual es omitido por razones de seguridad y política de uso.
-    """
-    try:
-        # Aquí iría la secuencia de peticiones requests.get/requests.post, 
-        # manejo de regex, y conversión de tokens.
-        
-        # Lógica simulada: Si el email es 'test@microsoft.com', devuelve un nombre.
-        if email.lower() == "test@microsoft.com":
-            return "TestUserMC"
-        
-        # En un caso real, la API te devolvería el nombre si el login es exitoso.
-        return None 
-    except Exception as e:
-        print(f"Error en el proceso de autenticación simulado: {e}")
-        return None
-
-# 🚨 FIN DE FUNCIÓN SIMULADA 🚨
-
-
-# --- Tasks y Eventos ---
+# --- Tasks y Eventos (Sin cambios relevantes aquí) ---
 
 @bot.event
 async def on_ready():
@@ -156,23 +127,20 @@ async def distribute_account():
     account_to_distribute = accounts_data['available'].pop(0)
 
     required_keys = ['gmail', 'password']
+    # Comprobamos solo el correo y la contraseña
     if not all(key in account_to_distribute for key in required_keys):
         accounts_data['available'].insert(0, account_to_distribute)
         return
 
-    # Usar el valor de 'username' que ahora contiene el nombre de MC (o 'N/A')
-    mc_username = account_to_distribute.get('username', 'N/A')
-    
     # Crear el Embed para la distribución
     embed = discord.Embed(
-        title=f"✨ Cuenta Disponible | Nombre MC: {mc_username} ✨", # Muestra el nombre de MC
+        title=f"✨ Cuenta Disponible | Correo: {account_to_distribute['gmail']} ✨",
         description="¡Se ha liberado una cuenta! Reacciona para indicar su estado:",
         color=discord.Color.dark_green()
     )
-    embed.add_field(name="🎮 Nombre de Minecraft", value=f"`{mc_username}`", inline=False)
     embed.add_field(name="📧 Correo (Microsoft)", value=f"`{account_to_distribute['gmail']}`", inline=False)
     embed.add_field(name="🔒 Contraseña", value=f"`{account_to_distribute['password']}`", inline=False)
-    embed.set_footer(text=f"Reacciona: ✅ Usada | ❌ Error Credenciales | 🚨 Cuenta No Servible | {len(accounts_data['available'])} restantes.")
+    embed.set_footer(text=f"Reacciona: ✅ Usada | ❌ Error Credenciales | 🚨 Cuenta No Sirve/Bloqueada | {len(accounts_data['available'])} restantes.")
 
     try:
         # Enviar el mensaje y añadir las tres reacciones
@@ -181,13 +149,15 @@ async def distribute_account():
         await message.add_reaction("❌")
         await message.add_reaction("🚨")
 
-        # Guardar la información de la distribución
+        # Guardar la información de la distribución (Esto ya actúa como el "log" solicitado)
         account_data_distributed = account_to_distribute.copy()
         account_data_distributed['distribution_date'] = datetime.now().isoformat()
         account_data_distributed['message_id'] = message.id
         account_data_distributed['reactions'] = {'✅':0,'❌':0,'🚨':0,'users':[]}
         accounts_data['distributed'].append(account_data_distributed)
         
+        # *** NUEVO: La cuenta ya está en 'distributed', no se requiere un log JSON adicional.
+        # Solo se requiere actualizar el log de texto y guardar los datos principales.
         save_accounts()
         update_log(account_to_distribute, "DISTRIBUTED")
         
@@ -236,28 +206,16 @@ async def add_account(ctx, email: str, password: str):
     """
     email_lower = email.lower()
 
-    # *** Chequeo de duplicados al añadir manualmente ***
+    # *** NUEVO: Chequeo de duplicados al añadir manualmente ***
     if email_lower in registered_emails:
         await ctx.send(f"❌ La cuenta con correo **{email}** ya existe en el inventario.")
         return
 
     await ctx.send("✅ Recibida la información.")
 
-    # 🚨 INTEGRACIÓN DE LA FUNCIÓN SIMULADA 🚨
-    await ctx.send("⏳ **Verificando credenciales y obteniendo nombre de usuario (simulación)...**")
-    
-    # El nombre de usuario se obtiene aquí (o None si falla)
-    mc_username = obtener_nombre_de_minecraft(email, password)
-    
-    if mc_username:
-        await ctx.send(f"✅ Nombre de usuario de Minecraft encontrado (simulado): **{mc_username}**")
-    else:
-        mc_username = "N/A - Falló Simulación" # Establecemos un valor por defecto para guardar
-        await ctx.send("⚠️ No se pudo obtener el nombre de usuario de Minecraft (simulado). La cuenta podría ser inválida o no tener el juego.")
-    # 🚨 FIN DE LA INTEGRACIÓN 🚨
-
-    # El campo 'username' ahora guarda el nombre de Minecraft
-    new_account = {'username': mc_username, 'gmail': email, 'password': password}
+    # El campo 'username' se utiliza internamente para mantener la estructura,
+    # pero ahora guarda el email.
+    new_account = {'username':email,'gmail':email,'password':password}
     accounts_data['available'].append(new_account)
     registered_emails.add(email_lower) # Añadir al set
     save_accounts()
@@ -269,7 +227,6 @@ async def add_account(ctx, email: str, password: str):
         description="La cuenta ha sido añadida al inventario y está lista para ser distribuida.",
         color=discord.Color.blue()
     )
-    embed.add_field(name="🎮 **Nombre MC**", value=mc_username)
     embed.add_field(name="📧 Correo (Microsoft)", value=email)
     embed.add_field(name="🔒 Contraseña", value=password)
     embed.add_field(name="Inventario Total", value=f"{len(accounts_data['available'])} disponibles")
@@ -313,16 +270,13 @@ async def import_accounts(ctx):
             email, password = stripped_line.split(":", 1)
             email_lower = email.lower()
 
-            # *** Lógica para evitar duplicados ***
+            # *** NUEVO: Lógica para evitar duplicados ***
             if email_lower in registered_emails:
                 duplicate_count += 1
                 continue # Saltar duplicados
             
-            # En la importación masiva no se realiza la verificación por rendimiento.
-            mc_username = "Pendiente" 
-            
             # Usamos el email como 'username' para el seguimiento interno
-            new_account = {'username':mc_username,'gmail':email,'password':password}
+            new_account = {'username':email,'gmail':email,'password':password}
             accounts_data['available'].append(new_account)
             registered_emails.add(email_lower) # Añadir al set
             update_log(new_account,"ADDED")
@@ -336,7 +290,9 @@ async def import_accounts(ctx):
 
     save_accounts()
 
-    # *** Eliminar o actualizar el archivo import_accounts.txt ***
+    # *** NUEVO: Eliminar o actualizar el archivo import_accounts.txt ***
+    # Si quedan líneas sin procesar (por formato), se reescribe el archivo.
+    # Si no queda ninguna, se elimina el archivo.
     if remaining_lines:
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(remaining_lines) + '\n')
@@ -365,6 +321,7 @@ async def add_account_error(ctx,error):
         await ctx.send("❌ Error al añadir la cuenta. Revisa la consola para más detalles.")
 
 # --- Keep Alive para Replit ---
+# ... (El resto del código de Keep Alive y Ejecución Final permanece sin cambios)
 
 app = Flask('')
 @app.route('/')
