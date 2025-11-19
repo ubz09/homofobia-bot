@@ -1,5 +1,3 @@
-# Archivo: requirements.txt
 discord.py
 python-dotenv
-requests
 Flask
