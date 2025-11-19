@@ -12,7 +12,7 @@ from flask import Flask
 
 # --- Configuración Inicial ---
 TOKEN = os.environ['DISCORD_TOKEN']
-CHANNEL_ID = int(os.environ['CHANNEL_ID']) 
+CHANNEL_ID = int(os.environ['CHANNEL_ID'])
 DISTRIBUTION_INTERVAL_MINUTES = 10.0
 
 # --- Rutas de Archivos ---
@@ -125,7 +125,6 @@ async def distribute_account():
     try:
         # Enviar el mensaje y añadir las tres reacciones
         message = await channel.send(embed=embed)
-        # ESTA ES LA LÍNEA 139 APROXIMADAMENTE (depende de tu editor) y está dentro del TRY
         await message.add_reaction("✅")
         await message.add_reaction("❌")
         await message.add_reaction("🚨") # Nueva reacción
@@ -141,7 +140,6 @@ async def distribute_account():
         save_accounts()
         update_log(account_to_distribute, "DISTRIBUTED")
     except:
-        # ESTE ES EL BLOQUE EXCEPT QUE FALTABA O NO SE SUBÍA
         # Si falla el envío (ej. el bot no tiene permisos), devolver la cuenta
         accounts_data['available'].insert(0, account_to_distribute)
 
@@ -187,7 +185,7 @@ async def add_account(ctx, email: str, password: str):
 
     await ctx.send("✅ Recibida la información.")
 
-    # El campo 'username' se utiliza internamente para mantener la estructura, 
+    # El campo 'username' se utiliza internamente para mantener la estructura,
     # pero ahora guarda el email.
     new_account = {'username':email,'gmail':email,'password':password}
     accounts_data['available'].append(new_account)
