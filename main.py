@@ -7,6 +7,10 @@ from datetime import datetime
 from threading import Thread
 from flask import Flask
 import asyncio
+from dotenv import load_dotenv
+
+# Cargar variables de entorno
+load_dotenv()
 
 # --- Configuración Inicial ---
 TOKEN = os.environ.get('DISCORD_TOKEN')
@@ -16,9 +20,11 @@ DISTRIBUTION_INTERVAL_MINUTES = 30.0
 # Validar variables de entorno requeridas
 if not TOKEN:
     print("❌ ERROR: DISCORD_TOKEN no está configurado")
+    print("💡 Asegúrate de configurar DISCORD_TOKEN en Railway")
     exit(1)
 if CHANNEL_ID == 0:
     print("❌ ERROR: CHANNEL_ID no está configurado")
+    print("💡 Asegúrate de configurar CHANNEL_ID en Railway")
     exit(1)
 
 # --- Rutas de Archivos ---
