@@ -11,7 +11,7 @@ from flask import Flask
 
 TOKEN = os.environ['DISCORD_TOKEN']
 CHANNEL_ID = int(os.environ['CHANNEL_ID'])
-DISTRIBUTION_INTERVAL_MINUTES = 60.0
+DISTRIBUTION_INTERVAL_MINUTES = 3.0
 
 DATA_DIR = 'data'
 ACCOUNTS_FILE = os.path.join(DATA_DIR, 'accounts.json')
