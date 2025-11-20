@@ -6,27 +6,11 @@ import os
 from datetime import datetime
 from threading import Thread
 from flask import Flask
-import asyncio
-import aiohttp
-import re
-from urllib.parse import urlparse, parse_qs
-from dotenv import load_dotenv
-
-# Cargar variables de entorno
-load_dotenv()
 
 # --- Configuración Inicial ---
-TOKEN = os.environ.get('DISCORD_TOKEN')
-CHANNEL_ID = int(os.environ.get('CHANNEL_ID', 0))
+TOKEN = os.environ['DISCORD_TOKEN']
+CHANNEL_ID = int(os.environ['CHANNEL_ID'])
 DISTRIBUTION_INTERVAL_MINUTES = 30.0
-
-# Validar variables de entorno requeridas
-if not TOKEN:
-    print("❌ ERROR: DISCORD_TOKEN no está configurado")
-    exit(1)
-if CHANNEL_ID == 0:
-    print("❌ ERROR: CHANNEL_ID no está configurado")
-    exit(1)
 
 # --- Rutas de Archivos ---
 DATA_DIR = 'data'
@@ -40,9 +24,11 @@ if not os.path.exists(DATA_DIR):
 for file_path in [ACCOUNTS_FILE, LOGS_FILE]:
     if not os.path.exists(file_path):
         if file_path.endswith('.json'):
+            # Inicializar el archivo JSON con las estructuras necesarias
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump({'available': [], 'distributed': []}, f, indent=4)
         else:
+            # Inicializar el archivo de logs
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write('--- Archivo de Registro de Cuentas ---\n')
 
@@ -50,602 +36,309 @@ for file_path in [ACCOUNTS_FILE, LOGS_FILE]:
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
+bot = commands.Bot(command_prefix='!', intents=intents)
 
-class AccountBot(commands.Bot):
-    def __init__(self):
-        super().__init__(
-            command_prefix='!',
-            intents=intents,
-            help_command=None
-        )
-        self.accounts_data = {'available': [], 'distributed': []}
-        self.registered_emails = set()
-        self.temp_verified_accounts = {}
+# Cargar los datos de las cuentas al iniciar
+accounts_data = {'available': [], 'distributed': []}
+# *** NUEVO: Conjunto para una búsqueda rápida de emails ya registrados ***
+registered_emails = set()
 
-bot = AccountBot()
-
-# --- Funciones de Autenticación Microsoft Simplificadas ---
-
-async def simple_microsoft_auth(email, password):
-    """
-    Autenticación simplificada y más robusta
-    """
-    try:
-        # Configurar sesión
-        timeout = aiohttp.ClientTimeout(total=20)
-        connector = aiohttp.TCPConnector(verify_ssl=False)
-        
-        async with aiohttp.ClientSession(
-            connector=connector,
-            timeout=timeout,
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-        ) as session:
-            
-            # Paso 1: Obtener página de login
-            auth_url = "https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en"
-            
-            async with session.get(auth_url) as response:
-                text = await response.text()
-                
-                # Buscar el token PPFT de diferentes formas
-                ppft = None
-                ppft_patterns = [
-                    r'name="PPFT" value="([^"]+)"',
-                    r'value="([^"]+)" id="i0327"',
-                    r'value="([^"]+)" name="PPFT"'
-                ]
-                
-                for pattern in ppft_patterns:
-                    match = re.search(pattern, text)
-                    if match:
-                        ppft = match.group(1)
-                        break
-                
-                if not ppft:
-                    return {"success": False, "error": "No se pudo obtener token PPFT"}
-                
-                # Buscar URL Post
-                url_post_match = re.search(r'urlPost:\s*[\'"]([^\'"]+)[\'"]', text)
-                if not url_post_match:
-                    return {"success": False, "error": "No se pudo obtener URL Post"}
-                
-                url_post = url_post_match.group(1)
-
-            # Paso 2: Enviar login
-            login_data = {
-                'login': email,
-                'loginfmt': email,
-                'passwd': password,
-                'PPFT': ppft,
-            }
-
-            async with session.post(
-                url_post,
-                data=login_data,
-                allow_redirects=True,
-                headers={'Content-Type': 'application/x-www-form-urlencoded'}
-            ) as response:
-                
-                # Verificar si hay redirección con token
-                if 'access_token' in str(response.url):
-                    parsed = urlparse(str(response.url))
-                    fragment = parse_qs(parsed.fragment)
-                    access_token = fragment.get('access_token', [None])[0]
-                    if access_token:
-                        return {"success": True, "access_token": access_token}
-                
-                # Leer respuesta para detectar errores específicos
-                response_text = await response.text()
-                
-                if "password is incorrect" in response_text.lower():
-                    return {"success": False, "error": "Contraseña incorrecta"}
-                elif "account doesn't exist" in response_text.lower():
-                    return {"success": False, "error": "La cuenta no existe"}
-                elif "recover" in response_text.lower() or "two-step" in response_text.lower():
-                    return {"success": False, "error": "Verificación en dos pasos requerida"}
-                elif "signed in too many times" in response_text.lower():
-                    return {"success": False, "error": "Demasiados intentos, cuenta temporalmente bloqueada"}
-                else:
-                    return {"success": False, "error": "Error de autenticación - Verifica las credenciales"}
-
-    except asyncio.TimeoutError:
-        return {"success": False, "error": "Tiempo de espera agotado"}
-    except Exception as e:
-        return {"success": False, "error": f"Error de conexión: {str(e)}"}
-
-async def get_minecraft_info(access_token):
-    """Obtiene información básica de Minecraft"""
-    try:
-        timeout = aiohttp.ClientTimeout(total=10)
-        connector = aiohttp.TCPConnector(verify_ssl=False)
-        
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            headers = {'Authorization': f'Bearer {access_token}'}
-            
-            # Verificar perfil de Minecraft
-            async with session.get('https://api.minecraftservices.com/minecraft/profile', headers=headers) as response:
-                if response.status == 200:
-                    profile_data = await response.json()
-                    return {
-                        "has_minecraft": True,
-                        "username": profile_data.get('name', 'No disponible'),
-                        "uuid": profile_data.get('id', 'No disponible')
-                    }
-                else:
-                    return {"has_minecraft": False}
-                    
-    except:
-        return {"has_minecraft": False}
-
-async def verify_microsoft_account(email, password):
-    """
-    Verificación simplificada y más confiable
-    """
-    # Validación básica
-    if "@" not in email or "." not in email:
-        return {
-            "success": False,
-            "error": "Formato de email inválido"
-        }
-    
-    if len(password) < 1:
-        return {
-            "success": False,
-            "error": "La contraseña no puede estar vacía"
-        }
-
-    # Intentar autenticación
-    auth_result = await simple_microsoft_auth(email, password)
-    
-    if not auth_result["success"]:
-        return auth_result
-
-    # Si la autenticación fue exitosa, verificar Minecraft
-    minecraft_info = await get_minecraft_info(auth_result["access_token"])
-    
-    if minecraft_info["has_minecraft"]:
-        return {
-            "success": True,
-            "email": email,
-            "password": password,
-            "has_minecraft": True,
-            "message": "✅ Cuenta verificada - Con Minecraft",
-            "details": {
-                "username": minecraft_info["username"],
-                "uuid": minecraft_info["uuid"],
-                "account_type": "Microsoft Account"
-            }
-        }
-    else:
-        return {
-            "success": True,
-            "email": email,
-            "password": password,
-            "has_minecraft": False,
-            "message": "✅ Cuenta Microsoft válida - Sin Minecraft"
-        }
-
-# --- Funciones Auxiliares del Bot ---
+# --- Funciones Auxiliares ---
 
 def load_accounts():
-    """Carga los datos de las cuentas desde el archivo JSON."""
+    """Carga los datos de las cuentas desde el archivo JSON y actualiza el conjunto de emails registrados."""
+    global accounts_data, registered_emails
     try:
         with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
             if 'available' in data and 'distributed' in data:
-                bot.accounts_data = data
-                bot.registered_emails.clear()
-                for account in bot.accounts_data['distributed']:
+                accounts_data = data
+                # Reconstruir el conjunto de emails registrados
+                registered_emails.clear()
+                # Las cuentas ya distribuidas son las que actúan como "logs"
+                for account in accounts_data['distributed']:
                     if 'gmail' in account:
-                        bot.registered_emails.add(account['gmail'].lower())
-                for account in bot.accounts_data['available']:
+                        registered_emails.add(account['gmail'].lower())
+                # También registramos las cuentas que aún están en 'available'
+                for account in accounts_data['available']:
                     if 'gmail' in account:
-                        bot.registered_emails.add(account['gmail'].lower())
-                print(f"✅ Cuentas cargadas: {len(bot.accounts_data['available'])} disponibles")
+                        registered_emails.add(account['gmail'].lower())
                 return True
-    except Exception as e:
-        print(f"❌ Error cargando cuentas: {e}")
-    return False
+            else:
+                return False
+    except:
+        return False
 
 def save_accounts():
     """Guarda los datos de las cuentas en el archivo JSON."""
     try:
         with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(bot.accounts_data, f, indent=4)
+            json.dump(accounts_data, f, indent=4)
     except Exception as e:
-        print(f"❌ Error guardando cuentas: {e}")
+        print(f"Error guardando cuentas: {e}")
 
 def update_log(account_info, status):
-    """Añade una entrada al archivo de registro."""
+    """Añade una entrada al archivo de registro (log)."""
+    # Usamos el 'gmail' (ahora cualquier email) como identificador principal en el log
     log_entry = (
         f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-        f"STATUS: {status} | Email: {account_info['gmail']}\n"
+        f"STATUS: {status} | Email: {account_info['gmail']} | Pass: {account_info['password']}\n"
     )
     try:
         with open(LOGS_FILE, 'a', encoding='utf-8') as f:
             f.write(log_entry)
     except Exception as e:
-        print(f"❌ Error escribiendo log: {e}")
+        print(f"Error escribiendo log: {e}")
 
+# *** NUEVO: Función para eliminar el archivo de importación ***
 def remove_import_file(file_path):
     """Elimina el archivo de importación de cuentas."""
     try:
         os.remove(file_path)
-        print(f"✅ Archivo de importación eliminado: {file_path}")
+        print(f"Archivo de importación eliminado: {file_path}")
     except Exception as e:
-        print(f"❌ Error al eliminar archivo {file_path}: {e}")
+        print(f"Error al eliminar archivo {file_path}: {e}")
 
-# --- Comandos Corregidos ---
+# --- Tasks y Eventos (Sin cambios relevantes aquí) ---
 
-@bot.command(name='verifyaccount')
-@commands.has_permissions(administrator=True)
-async def verify_account(ctx, email: str, password: str):
-    """Verifica una cuenta de Microsoft."""
-    
-    processing_msg = await ctx.send("🔍 **Verificando cuenta...**")
-    
-    try:
-        result = await verify_microsoft_account(email, password)
-        await processing_msg.delete()
-        
-        if result["success"]:
-            if result.get("has_minecraft", False):
-                details = result["details"]
-                
-                embed = discord.Embed(
-                    title="✅ **CUENTA VERIFICADA - CON MINECRAFT**",
-                    color=0x00ff00
-                )
-                
-                embed.add_field(
-                    name="📧 **Credenciales**",
-                    value=f"**Email:** `{email}`\n**Contraseña:** `{password}`",
-                    inline=False
-                )
-                
-                embed.add_field(
-                    name="🎮 **Información Minecraft**",
-                    value=f"**Usuario:** `{details['username']}`\n**UUID:** `{details['uuid']}`",
-                    inline=False
-                )
-                
-                embed.set_footer(text="Reacciona con ✅ para añadir al inventario o ❌ para cancelar")
-                
-            else:
-                embed = discord.Embed(
-                    title="✅ **CUENTA VERIFICADA - SIN MINECRAFT**",
-                    color=0xffff00
-                )
-                
-                embed.add_field(
-                    name="📧 **Credenciales**",
-                    value=f"**Email:** `{email}`\n**Contraseña:** `{password}`",
-                    inline=False
-                )
-                
-                embed.add_field(
-                    name="💡 **Estado**",
-                    value="Cuenta Microsoft válida pero sin Minecraft",
-                    inline=False
-                )
-                
-                embed.set_footer(text="Reacciona con ✅ para añadir al inventario o ❌ para cancelar")
-            
-            message = await ctx.send(embed=embed)
-            await message.add_reaction("✅")
-            await message.add_reaction("❌")
-            
-            bot.temp_verified_accounts[message.id] = {
-                "email": email,
-                "password": password,
-                **result
-            }
-            
-        else:
-            embed = discord.Embed(
-                title="❌ **ERROR EN VERIFICACIÓN**",
-                color=0xff0000
-            )
-            
-            embed.add_field(
-                name="📧 **Credenciales**",
-                value=f"**Email:** `{email}`\n**Contraseña:** `{password}`",
-                inline=False
-            )
-            
-            embed.add_field(
-                name="🚨 **Error**",
-                value=result["error"],
-                inline=False
-            )
-            
-            await ctx.send(embed=embed)
-            
-    except Exception as e:
-        await processing_msg.delete()
-        embed = discord.Embed(
-            title="💥 **ERROR**",
-            description=f"Error inesperado: {str(e)}",
-            color=0xff0000
-        )
-        await ctx.send(embed=embed)
-
-@bot.command(name='importaccounts')
-@commands.has_permissions(administrator=True)
-async def import_accounts(ctx):
-    """Importa cuentas desde un archivo de texto."""
-    file_path = "import_accounts.txt"
-    
-    if not os.path.exists(file_path):
-        embed = discord.Embed(
-            title="❌ **Archivo No Encontrado**",
-            description=f"No se encontró el archivo `{file_path}`",
-            color=0xff0000
-        )
-        await ctx.send(embed=embed)
-        return
-
-    processing_msg = await ctx.send("📥 **Importando cuentas...**")
-    
-    try:
-        success_count = 0
-        fail_count = 0
-        duplicate_count = 0
-        remaining_lines = []
-
-        with open(file_path, 'r', encoding='utf-8') as f:
-            lines = f.read().splitlines()
-        
-        for line in lines:
-            stripped_line = line.strip()
-            if not stripped_line:
-                continue
-
-            if stripped_line.count(":") != 1:
-                remaining_lines.append(line)
-                fail_count += 1
-                continue
-
-            try:
-                email, password = stripped_line.split(":", 1)
-                email_lower = email.lower().strip()
-
-                if email_lower in bot.registered_emails:
-                    duplicate_count += 1
-                    continue
-                
-                new_account = {
-                    'username': email,
-                    'gmail': email,
-                    'password': password,
-                    'added_date': datetime.now().isoformat(),
-                    'added_by': 'import'
-                }
-                
-                bot.accounts_data['available'].append(new_account)
-                bot.registered_emails.add(email_lower)
-                success_count += 1
-
-            except Exception as e:
-                remaining_lines.append(line)
-                fail_count += 1
-                print(f"Error procesando línea: {line} - {e}")
-
-        save_accounts()
-
-        # Manejar archivo restante
-        if remaining_lines:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(remaining_lines) + '\n')
-        else:
-            remove_import_file(file_path)
-
-        # Mostrar resultados
-        embed = discord.Embed(
-            title="📊 **Resultados de Importación**",
-            color=0x0099ff
-        )
-        embed.add_field(name="✅ Correctas", value=success_count, inline=True)
-        embed.add_field(name="🔄 Duplicadas", value=duplicate_count, inline=True)
-        embed.add_field(name="❌ Fallidas", value=fail_count, inline=True)
-        embed.add_field(name="📦 Total Inventario", value=f"{len(bot.accounts_data['available'])}", inline=False)
-        
-        await ctx.send(embed=embed)
-        
-        # Actualizar presencia
-        await bot.change_presence(
-            activity=discord.Activity(
-                type=discord.ActivityType.watching,
-                name=f"{len(bot.accounts_data['available'])} cuentas"
-            )
-        )
-
-    except Exception as e:
-        embed = discord.Embed(
-            title="❌ **Error en Importación**",
-            description=f"Error: {str(e)}",
-            color=0xff0000
-        )
-        await ctx.send(embed=embed)
-    
-    finally:
-        await processing_msg.delete()
-
-@bot.command(name='addaccount')
-@commands.has_permissions(administrator=True)
-async def add_account(ctx, email: str, password: str):
-    """Añade una cuenta manualmente."""
-    email_lower = email.lower()
-
-    if email_lower in bot.registered_emails:
-        embed = discord.Embed(
-            title="❌ **Cuenta Duplicada**",
-            description=f"La cuenta `{email}` ya existe.",
-            color=0xff0000
-        )
-        await ctx.send(embed=embed)
-        return
-
-    new_account = {
-        'username': email,
-        'gmail': email,
-        'password': password,
-        'added_date': datetime.now().isoformat(),
-        'added_by': str(ctx.author)
-    }
-    
-    bot.accounts_data['available'].append(new_account)
-    bot.registered_emails.add(email_lower)
-    save_accounts()
-
-    embed = discord.Embed(
-        title="✅ **Cuenta Añadida**",
-        color=0x00ff00
-    )
-    embed.add_field(name="📧 Email", value=email, inline=True)
-    embed.add_field(name="📊 Total", value=f"{len(bot.accounts_data['available'])}", inline=True)
-    
-    await ctx.send(embed=embed)
-
-@bot.command(name='stats')
-async def stats(ctx):
-    """Muestra estadísticas del inventario."""
-    embed = discord.Embed(title="📊 **Estadísticas**", color=0x0099ff)
-    embed.add_field(name="📥 Disponibles", value=len(bot.accounts_data['available']), inline=True)
-    embed.add_field(name="📤 Distribuidas", value=len(bot.accounts_data['distributed']), inline=True)
-    await ctx.send(embed=embed)
-
-@bot.command(name='help')
-async def help_command(ctx):
-    """Muestra ayuda de comandos."""
-    embed = discord.Embed(
-        title="🤖 **Comandos Disponibles**",
-        color=0x0099ff
-    )
-    
-    commands_list = [
-        ("!verifyaccount <email> <contraseña>", "Verifica una cuenta Microsoft"),
-        ("!addaccount <email> <contraseña>", "Añade una cuenta manualmente"),
-        ("!importaccounts", "Importa cuentas desde import_accounts.txt"),
-        ("!stats", "Muestra estadísticas del inventario"),
-        ("!help", "Muestra esta ayuda")
-    ]
-    
-    for cmd, desc in commands_list:
-        embed.add_field(name=cmd, value=desc, inline=False)
-    
-    await ctx.send(embed=embed)
-
-# --- Manejo de Reacciones ---
-@bot.event
-async def on_reaction_add(reaction, user):
-    if user.bot:
-        return
-
-    # Manejar verificación de cuentas
-    if reaction.message.id in bot.temp_verified_accounts:
-        if str(reaction.emoji) == "✅" and user != bot.user:
-            account_data = bot.temp_verified_accounts[reaction.message.id]
-            email_lower = account_data["email"].lower()
-            
-            if email_lower not in bot.registered_emails:
-                new_account = {
-                    'username': account_data["email"],
-                    'gmail': account_data["email"],
-                    'password': account_data["password"],
-                    'verified': True,
-                    'added_date': datetime.now().isoformat(),
-                    'added_by': str(user)
-                }
-                
-                if account_data.get("has_minecraft") and "details" in account_data:
-                    new_account.update(account_data["details"])
-                
-                bot.accounts_data['available'].append(new_account)
-                bot.registered_emails.add(email_lower)
-                save_accounts()
-                
-                await reaction.message.reply("✅ **Cuenta añadida al inventario!**")
-                
-                await bot.change_presence(
-                    activity=discord.Activity(
-                        type=discord.ActivityType.watching,
-                        name=f"{len(bot.accounts_data['available'])} cuentas"
-                    )
-                )
-            else:
-                await reaction.message.reply("❌ **Esta cuenta ya existe en el inventario.**")
-            
-            del bot.temp_verified_accounts[reaction.message.id]
-            await reaction.message.clear_reactions()
-        
-        elif str(reaction.emoji) == "❌" and user != bot.user:
-            await reaction.message.reply("❌ **Cuenta descartada.**")
-            del bot.temp_verified_accounts[reaction.message.id]
-            await reaction.message.clear_reactions()
-
-# --- Eventos del Bot ---
 @bot.event
 async def on_ready():
-    print(f'🤖 Bot conectado como {bot.user}')
+    """Evento que se ejecuta cuando el bot está listo."""
+    print(f'🤖 Bot conectado como {bot.user}!')
     load_accounts()
-    
-    if not distribute_account.is_running():
-        distribute_account.start()
-    
-    await bot.change_presence(
-        activity=discord.Activity(
-            type=discord.ActivityType.watching,
-            name=f"{len(bot.accounts_data['available'])} cuentas"
-        )
-    )
+    # Iniciar el bucle de distribución
+    distribute_account.start()
 
 @tasks.loop(minutes=DISTRIBUTION_INTERVAL_MINUTES)
 async def distribute_account():
-    """Distribuye cuentas automáticamente."""
+    """Tarea de bucle para distribuir cuentas en el canal configurado."""
+    await bot.wait_until_ready()
+    channel = bot.get_channel(CHANNEL_ID)
+
+    if not channel or not accounts_data['available']:
+        return
+
+    # Sacar la primera cuenta disponible
+    account_to_distribute = accounts_data['available'].pop(0)
+
+    required_keys = ['gmail', 'password']
+    # Comprobamos solo el correo y la contraseña
+    if not all(key in account_to_distribute for key in required_keys):
+        accounts_data['available'].insert(0, account_to_distribute)
+        return
+
+    # Crear el Embed para la distribución
+    embed = discord.Embed(
+        title=f"✨ Cuenta Disponible | Correo: {account_to_distribute['gmail']} ✨",
+        description="¡Se ha liberado una cuenta! Reacciona para indicar su estado:",
+        color=discord.Color.dark_green()
+    )
+    embed.add_field(name="📧 Correo (Microsoft)", value=f"`{account_to_distribute['gmail']}`", inline=False)
+    embed.add_field(name="🔒 Contraseña", value=f"`{account_to_distribute['password']}`", inline=False)
+    embed.set_footer(text=f"Reacciona: ✅ Usada | ❌ Error Credenciales | 🚨 Cuenta No Sirve/Bloqueada | {len(accounts_data['available'])} restantes.")
+
     try:
-        channel = bot.get_channel(CHANNEL_ID)
-        if channel and bot.accounts_data['available']:
-            account = bot.accounts_data['available'].pop(0)
-            
-            embed = discord.Embed(
-                title="🎁 **Cuenta Disponible**",
-                color=0x0099ff
-            )
-            embed.add_field(name="📧 Email", value=f"`{account['gmail']}`", inline=False)
-            embed.add_field(name="🔒 Contraseña", value=f"`{account['password']}`", inline=False)
-            embed.set_footer(text="Reacciona: ✅ Usada | ❌ Error | 🚨 Bloqueada")
-            
-            message = await channel.send(embed=embed)
-            await message.add_reaction("✅")
-            await message.add_reaction("❌")
-            await message.add_reaction("🚨")
-            
+        # Enviar el mensaje y añadir las tres reacciones
+        message = await channel.send(embed=embed)
+        await message.add_reaction("✅")
+        await message.add_reaction("❌")
+        await message.add_reaction("🚨")
+
+        # Guardar la información de la distribución (Esto ya actúa como el "log" solicitado)
+        account_data_distributed = account_to_distribute.copy()
+        account_data_distributed['distribution_date'] = datetime.now().isoformat()
+        account_data_distributed['message_id'] = message.id
+        account_data_distributed['reactions'] = {'✅':0,'❌':0,'🚨':0,'users':[]}
+        accounts_data['distributed'].append(account_data_distributed)
+        
+        # *** NUEVO: La cuenta ya está en 'distributed', no se requiere un log JSON adicional.
+        # Solo se requiere actualizar el log de texto y guardar los datos principales.
+        save_accounts()
+        update_log(account_to_distribute, "DISTRIBUTED")
+        
+    except:
+        # Si falla el envío (ej. el bot no tiene permisos), devolver la cuenta
+        accounts_data['available'].insert(0, account_to_distribute)
+
+
+@bot.event
+async def on_reaction_add(reaction, user):
+    """Maneja las reacciones a los mensajes de distribución."""
+    if user.bot:
+        return
+
+    valid_emojis = ["✅","❌", "🚨"]
+
+    # Comprobar si la reacción está en el canal correcto y es un emoji válido
+    if reaction.message.channel.id != CHANNEL_ID or str(reaction.emoji) not in valid_emojis:
+        return
+
+    message_id = reaction.message.id
+    reacted_emoji = str(reaction.emoji)
+    user_id = user.id
+
+    # Buscar la cuenta distribuida correspondiente
+    for account in accounts_data['distributed']:
+        if account.get('message_id') == message_id:
+            # Comprobar si el usuario ya reaccionó
+            if user_id in account['reactions']['users']:
+                await reaction.remove(user)
+                return
+
+            # Registrar la nueva reacción
+            account['reactions']['users'].append(user_id)
+            account['reactions'][reacted_emoji] += 1
             save_accounts()
+            return
+
+# --- Comandos ---
+
+@bot.command(name='addaccount', help='Añade una cuenta de Microsoft (Email y Password). Formato: !addaccount <correo> <contraseña>')
+@commands.has_permissions(administrator=True)
+async def add_account(ctx, email: str, password: str):
+    """
+    Añade una cuenta al inventario, usando el email como identificador principal.
+    """
+    email_lower = email.lower()
+
+    # *** NUEVO: Chequeo de duplicados al añadir manualmente ***
+    if email_lower in registered_emails:
+        await ctx.send(f"❌ La cuenta con correo **{email}** ya existe en el inventario.")
+        return
+
+    await ctx.send("✅ Recibida la información.")
+
+    # El campo 'username' se utiliza internamente para mantener la estructura,
+    # pero ahora guarda el email.
+    new_account = {'username':email,'gmail':email,'password':password}
+    accounts_data['available'].append(new_account)
+    registered_emails.add(email_lower) # Añadir al set
+    save_accounts()
+    update_log(new_account,"ADDED")
+
+    # Enviar confirmación con Embed
+    embed = discord.Embed(
+        title="✅ Cuenta Añadida",
+        description="La cuenta ha sido añadida al inventario y está lista para ser distribuida.",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="📧 Correo (Microsoft)", value=email)
+    embed.add_field(name="🔒 Contraseña", value=password)
+    embed.add_field(name="Inventario Total", value=f"{len(accounts_data['available'])} disponibles")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name='importaccounts', help='Importa varias cuentas desde archivo import_accounts.txt con formato: correo:contraseña')
+@commands.has_permissions(administrator=True)
+async def import_accounts(ctx):
+    """
+    Importa cuentas desde un archivo de texto con formato email:contraseña, 
+    evitando duplicados y eliminando el archivo después de un procesamiento exitoso.
+    """
+    file_path = "import_accounts.txt"
+    if not os.path.exists(file_path):
+        await ctx.send(f"❌ No se encontró el archivo {file_path}. Asegúrate de crearlo con formato `correo:contraseña` por línea.")
+        return
+
+    await ctx.send("⏳ Importando cuentas...")
+    success_count = 0
+    fail_count = 0
+    duplicate_count = 0
+
+    # Lista para guardar las líneas no procesadas (por formato incorrecto)
+    remaining_lines = [] 
+
+    with open(file_path,'r',encoding='utf-8') as f:
+        lines = f.read().splitlines()
+        
+    for line in lines:
+        stripped_line = line.strip()
+        if not stripped_line: continue # Saltar líneas vacías
+
+        if stripped_line.count(":") != 1: 
+            remaining_lines.append(line)
+            fail_count += 1
+            continue # Debe haber exactamente un ':' (email:pass)
+
+        try:
+            # Separar los dos valores
+            email, password = stripped_line.split(":", 1)
+            email_lower = email.lower()
+
+            # *** NUEVO: Lógica para evitar duplicados ***
+            if email_lower in registered_emails:
+                duplicate_count += 1
+                continue # Saltar duplicados
             
-    except Exception as e:
-        print(f"Error en distribución: {e}")
+            # Usamos el email como 'username' para el seguimiento interno
+            new_account = {'username':email,'gmail':email,'password':password}
+            accounts_data['available'].append(new_account)
+            registered_emails.add(email_lower) # Añadir al set
+            update_log(new_account,"ADDED")
+            success_count += 1
 
-# --- Keep Alive ---
-app = Flask(__name__)
+        except Exception as e:
+            # Si hay una excepción, la línea no se procesó correctamente
+            remaining_lines.append(line) 
+            print(f"Error procesando línea en import: {line}. Error: {e}")
+            fail_count += 1
 
+    save_accounts()
+
+    # *** NUEVO: Eliminar o actualizar el archivo import_accounts.txt ***
+    # Si quedan líneas sin procesar (por formato), se reescribe el archivo.
+    # Si no queda ninguna, se elimina el archivo.
+    if remaining_lines:
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(remaining_lines) + '\n')
+        await ctx.send(f"⚠️ **{fail_count}** líneas con formato incorrecto. Quedan en `{file_path}` para corrección.")
+    else:
+        # Si todo se procesó o se saltó por duplicado, eliminamos el archivo.
+        remove_import_file(file_path)
+    
+    await ctx.send(
+        f"✅ Importadas **{success_count}** cuentas correctamente.\n"
+        f"🔄 Duplicadas (ya en inventario): **{duplicate_count}** (omitidas).\n"
+        f"❌ Fallidas (formato incorrecto): **{fail_count}**."
+    )
+
+
+@add_account.error
+async def add_account_error(ctx,error):
+    """Maneja errores específicos del comando addaccount."""
+    if isinstance(error, commands.MissingRequiredArgument):
+        # Ahora solo se requieren 2 argumentos
+        await ctx.send("❌ Uso incorrecto: `!addaccount <correo_completo> <contraseña>`")
+    elif isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Permiso denegado. Solo administradores pueden usar este comando.")
+    else:
+        print(f"Error inesperado en add_account: {error}")
+        await ctx.send("❌ Error al añadir la cuenta. Revisa la consola para más detalles.")
+
+# --- Keep Alive para Replit ---
+# ... (El resto del código de Keep Alive y Ejecución Final permanece sin cambios)
+
+app = Flask('')
 @app.route('/')
 def home():
-    return "🤖 Bot de Cuentas Microsoft - En línea"
+    """Ruta simple para mantener el bot activo en entornos como Replit."""
+    return "Bot is running and ready!"
 
-def run_flask():
+def run():
+    """Ejecuta la aplicación Flask."""
     app.run(host='0.0.0.0', port=8080)
 
 def keep_alive():
-    t = Thread(target=run_flask, daemon=True)
+    """Inicia el thread para mantener la aplicación web activa."""
+    t = Thread(target=run)
     t.start()
 
-# --- Ejecución ---
+# --- Ejecución Final ---
 if __name__ == '__main__':
     keep_alive()
     try:
         bot.run(TOKEN)
+    except discord.LoginFailure:
+        print("*** ERROR: Token de Discord inválido ***")
     except Exception as e:
-        print(f"❌ Error iniciando bot: {e}")
+        print(f"*** ERROR FATAL: {e} ***")
