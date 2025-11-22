@@ -103,7 +103,7 @@ async def help_command(interaction: discord.Interaction):
     await interaction.response.defer()
     
     embed = discord.Embed(
-        title="🎀 Gestor de Cuentas Shizuku - Ayuda",
+        title="🎀 HMFB X - Ayuda",
         color=0xa832a8,
         description="Guía completa de todos los comandos disponibles"
     )
@@ -168,7 +168,7 @@ async def help_command(interaction: discord.Interaction):
     )
     
     # Footer
-    embed.set_footer(text="🎀 Shizuku | Creado para Gestión de Cuentas Minecraft", icon_url=None)
+    embed.set_footer(text="🎀 HMFB X ", icon_url=None)
     embed.timestamp = discord.utils.utcnow()
     
     await interaction.followup.send(embed=embed)
